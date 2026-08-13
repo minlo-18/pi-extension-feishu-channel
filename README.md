@@ -5,6 +5,7 @@
 - **扫码登录（默认）**：首次运行若没有凭证，自动弹出**二维码**，用飞书手机 App 扫码即可**选择或创建**一个机器人，凭证自动落盘——无需手动复制 App ID / App Secret。也可随时 `/feishu-login`。
 - **收消息**：通过飞书 **WebSocket 长连接** 接收 `im.message.receive_v1`。入站先经**逻辑重试去重**（防长连接重推）→ **同发送人去抖合并**（连发消息并成一个 turn）→ **准入网关**（私聊白名单 / 群策略 / @提及 / 机器人过滤）→ **每会话串行队列**（同会话 FIFO、异会话并发、超时驱逐防卡死）。图片内联转多模态、文件/语音/视频下载落地后交给 agent。
 - **流式回复**：随 agent 生成 token **实时刷新 CardKit 打字机卡片**（`streaming_mode`），结束时定稿；CardKit 不可用/失败时回退普通消息。
+- **处理中表情**：收到消息后立即在你的消息上加一个“处理中”表情（默认 `OnIt`），回答完自动移除、失败换成失败表情——熟悉的"已收到/正在处理"反馈。
 - **静态卡片升级**：非流式回复含代码块/表格时，用 **schema-2.0 交互卡片**渲染（优于 post），其余 markdown 走 `post`。
 - **交互卡片审批**：可选开启后，危险工具调用先发 **Approve/Deny 卡片**并阻塞，按钮点击带 **token 去重**，人工批准后才执行。
 - **出站媒体工具**：注册 `feishu_send_file`，让 agent 主动把本地图片/文件推送到会话。
@@ -165,6 +166,9 @@ pi --extension /abs/path/to/pi-extension-feishu-channel/index.ts
 | `FEISHU_DEDUP_ENABLED` | | `true` | 逻辑重试去重（防长连接重推同一逻辑消息） |
 | `FEISHU_DEDUP_TTL_MS` | | `86400000` | 去重缓存保留时长（毫秒，默认 24h） |
 | `FEISHU_ONBOARDING` | | `true` | 缺凭证时默认走二维码扫码登录（需交互式终端）；设 `false` 只用手动凭证 |
+| `FEISHU_REACT_ENABLED` | | `true` | 收到消息时在触发消息上加“处理中”表情，回答完移除（失败换失败表情） |
+| `FEISHU_REACT_EMOJI` | | `OnIt` | 处理中表情的 emoji_type（如 `OnIt`/`Typing`/`Thinking`/`Get`） |
+| `FEISHU_REACT_FAIL_EMOJI` | | `CrossMark` | 失败时替换的 emoji_type；留空则仅移除处理中表情 |
 
 ```bash
 export FEISHU_APP_ID="cli_xxxxxxxx"

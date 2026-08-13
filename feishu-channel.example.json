@@ -43,5 +43,9 @@
   "queueTaskTimeoutMs": 300000,
 
   "dedupEnabled": true,
-  "dedupTtlMs": 86400000
+  "dedupTtlMs": 86400000,
+
+  "reactEnabled": true,
+  "reactEmoji": "OnIt",
+  "reactFailEmoji": "CrossMark"
 }

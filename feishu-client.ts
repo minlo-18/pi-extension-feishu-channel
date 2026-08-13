@@ -71,16 +71,22 @@ interface FileResource {
 interface MessageResourceApi {
 	get: (args: unknown) => Promise<ResourceDownload>;
 }
+interface MessageReactionApi {
+	create: (args: unknown) => Promise<{ data?: { reaction_id?: string } } | null>;
+	delete: (args: unknown) => Promise<unknown>;
+}
 interface LarkImNamespace {
 	message?: MessageResource;
 	image?: ImageResource;
 	file?: FileResource;
 	messageResource?: MessageResourceApi;
+	messageReaction?: MessageReactionApi;
 	v1?: {
 		message: MessageResource;
 		image: ImageResource;
 		file: FileResource;
 		messageResource: MessageResourceApi;
+		messageReaction: MessageReactionApi;
 	};
 }
 interface CardApi {
@@ -155,6 +161,37 @@ export class FeishuClient {
 	}
 	private messageResourceApi(): MessageResourceApi {
 		return (this.client.im.v1?.messageResource ?? this.client.im.messageResource) as MessageResourceApi;
+	}
+	private messageReactionApi(): MessageReactionApi {
+		return (this.client.im.v1?.messageReaction ?? this.client.im.messageReaction) as MessageReactionApi;
+	}
+
+	/**
+	 * Add an emoji reaction to a message; returns its reaction_id (needed to
+	 * remove it later). Best effort — returns undefined on failure.
+	 */
+	async addReaction(messageId: string, emojiType: string): Promise<string | undefined> {
+		await this.ensureLoaded();
+		try {
+			const resp = await this.messageReactionApi().create({
+				path: { message_id: messageId },
+				data: { reaction_type: { emoji_type: emojiType } },
+			});
+			return resp?.data?.reaction_id;
+		} catch (err) {
+			this.log(`addReaction(${emojiType}) failed: ${(err as Error).message}`);
+			return undefined;
+		}
+	}
+
+	/** Remove a previously-added reaction. Best effort. */
+	async removeReaction(messageId: string, reactionId: string): Promise<void> {
+		await this.ensureLoaded();
+		try {
+			await this.messageReactionApi().delete({ path: { message_id: messageId, reaction_id: reactionId } });
+		} catch (err) {
+			this.log(`removeReaction failed: ${(err as Error).message}`);
+		}
 	}
 	private cardApi(): CardApi | undefined {
 		return this.client.cardkit?.v1?.card ?? this.client.cardkit?.card;

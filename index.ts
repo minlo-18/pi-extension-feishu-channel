@@ -116,6 +116,9 @@ export default function feishuChannel(pi: ExtensionAPI): void {
 	let streamStartFailUntil = 0; // backoff timestamp after a failed start
 	const STREAM_START_BACKOFF_MS = 60000;
 
+	// "Processing" reaction on the triggering message for the active turn.
+	let activeReaction: { messageId: string; reactionId?: string } | undefined;
+
 	const pendingApprovals = new Map<string, PendingApproval>();
 	const cardTokens = new Map<string, TokenClaim>();
 	let approvalSeq = 0;
@@ -169,6 +172,22 @@ export default function feishuChannel(pi: ExtensionAPI): void {
 					}
 				}
 			}
+		}
+	}
+
+	/**
+	 * Clear the active "processing" reaction. On failure, optionally swap it for
+	 * the configured failure emoji instead of leaving nothing. Idempotent.
+	 */
+	async function clearReaction(failed: boolean): Promise<void> {
+		const active = activeReaction;
+		activeReaction = undefined;
+		if (!client || !active) return;
+		if (active.reactionId) {
+			await client.removeReaction(active.messageId, active.reactionId);
+		}
+		if (failed && cfg?.reactFailEmoji) {
+			await client.addReaction(active.messageId, cfg.reactFailEmoji);
 		}
 	}
 
@@ -381,6 +400,21 @@ export default function feishuChannel(pi: ExtensionAPI): void {
 		} catch (err) {
 			log(`sendUserMessage failed: ${(err as Error).message}`);
 			void deliver(target, `Failed to route your message: ${(err as Error).message}`);
+			return;
+		}
+
+		// Add a "processing" reaction on the triggering message (typing/ack
+		// feedback), tracked so agent_end can remove it. Only for a fresh turn
+		// (idle) — a follow-up joins the in-flight turn whose reaction already
+		// exists. Best effort; never blocks message routing.
+		if (cfg.reactEnabled && client && idle && !activeReaction) {
+			const reactMsgId = target.lastMessageId;
+			activeReaction = { messageId: reactMsgId };
+			void client.addReaction(reactMsgId, cfg.reactEmoji).then((reactionId) => {
+				// Guard against a turn that already ended before the add returned.
+				if (activeReaction?.messageId === reactMsgId) activeReaction.reactionId = reactionId;
+				else if (reactionId) void client?.removeReaction(reactMsgId, reactionId);
+			});
 		}
 	}
 
@@ -648,6 +682,10 @@ export default function feishuChannel(pi: ExtensionAPI): void {
 		const messages = (event.messages ?? []) as Array<{ role?: string; content?: unknown }>;
 		const text = extractAssistantText(messages);
 
+		// Clear the "processing" reaction: remove on success, or swap to the
+		// failure emoji when the turn produced no visible reply.
+		await clearReaction(!text);
+
 		// If we streamed a card this turn, finalize it and (if it carries the
 		// content) skip the redundant message send.
 		if (stream) {
@@ -716,7 +754,7 @@ export default function feishuChannel(pi: ExtensionAPI): void {
 			const status = started ? "connected" : "not connected";
 			const bound = boundChat ? `${boundChat.chatId} (${boundChat.chatType})` : "none";
 			const feats = cfg
-				? `stream=${cfg.streaming} card=${cfg.staticCard} dedup=${cfg.dedupEnabled} debounce=${cfg.debounceEnabled} queue=${cfg.queueEnabled} approval=${cfg.approvalEnabled}`
+				? `stream=${cfg.streaming} card=${cfg.staticCard} react=${cfg.reactEnabled}(${cfg.reactEmoji}) dedup=${cfg.dedupEnabled} debounce=${cfg.debounceEnabled} queue=${cfg.queueEnabled} approval=${cfg.approvalEnabled}`
 				: "(no config)";
 			const recent = logLines.slice(-8).join("\n") || "(no log lines yet)";
 			ctx.ui.notify(`Feishu: ${status}; bound: ${bound}; ${feats}\n${recent}`, "info");
@@ -747,6 +785,7 @@ export default function feishuChannel(pi: ExtensionAPI): void {
 		if (sweepTimer) clearInterval(sweepTimer);
 		sweepTimer = undefined;
 		debouncer?.flushAll();
+		await clearReaction(false);
 		if (stream) {
 			await stream.abandon().catch(() => {});
 			stream = undefined;

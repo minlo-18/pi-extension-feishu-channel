@@ -133,6 +133,17 @@ export interface FeishuConfig {
 	dedupTtlMs: number;
 
 	/**
+	 * Add a "processing" emoji reaction on the user's triggering message while
+	 * the agent works, and remove it (or swap to the failure emoji) when done.
+	 * This is the familiar typing/ack feedback in chat clients. Default true.
+	 */
+	reactEnabled: boolean;
+	/** Emoji reaction shown while processing. Default "OnIt". */
+	reactEmoji: string;
+	/** Emoji swapped in on failure. Empty = just remove the processing one. Default "CrossMark". */
+	reactFailEmoji: string;
+
+	/**
 	 * When credentials are missing, launch the QR scan-to-create/select flow
 	 * (openclaw-style) instead of just disabling the channel. Default true.
 	 * The QR prints to the terminal, so this only auto-runs on an interactive
@@ -175,6 +186,9 @@ const DEFAULTS = {
 	queueTaskTimeoutMs: 300000,
 	dedupEnabled: true,
 	dedupTtlMs: 86400000,
+	reactEnabled: true,
+	reactEmoji: "OnIt",
+	reactFailEmoji: "CrossMark",
 	onboarding: true,
 };
 
@@ -361,6 +375,9 @@ export function loadConfig(opts: LoadConfigOptions): LoadConfigResult {
 		queueTaskTimeoutMs: toInt(pick("FEISHU_QUEUE_TASK_TIMEOUT_MS", "queueTaskTimeoutMs"), DEFAULTS.queueTaskTimeoutMs, { min: 1000 }),
 		dedupEnabled: toBool(pick("FEISHU_DEDUP_ENABLED", "dedupEnabled"), DEFAULTS.dedupEnabled),
 		dedupTtlMs: toInt(pick("FEISHU_DEDUP_TTL_MS", "dedupTtlMs"), DEFAULTS.dedupTtlMs, { min: 1000 }),
+		reactEnabled: toBool(pick("FEISHU_REACT_ENABLED", "reactEnabled"), DEFAULTS.reactEnabled),
+		reactEmoji: String(pick("FEISHU_REACT_EMOJI", "reactEmoji") ?? DEFAULTS.reactEmoji).trim() || DEFAULTS.reactEmoji,
+		reactFailEmoji: String(pick("FEISHU_REACT_FAIL_EMOJI", "reactFailEmoji") ?? DEFAULTS.reactFailEmoji).trim(),
 		onboarding: toBool(pick("FEISHU_ONBOARDING", "onboarding"), DEFAULTS.onboarding),
 	};
 
