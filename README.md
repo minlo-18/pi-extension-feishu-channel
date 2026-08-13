@@ -2,15 +2,16 @@
 
 面向 **pi-agent** 的飞书 / Lark 聊天渠道插件。它把一个飞书机器人接到 pi coding-agent 会话上：
 
+- **扫码登录（默认）**：首次运行若没有凭证，自动弹出**二维码**，用飞书手机 App 扫码即可**选择或创建**一个机器人，凭证自动落盘——无需手动复制 App ID / App Secret。也可随时 `/feishu-login`。
 - **收消息**：通过飞书 **WebSocket 长连接** 接收 `im.message.receive_v1`。入站先经**逻辑重试去重**（防长连接重推）→ **同发送人去抖合并**（连发消息并成一个 turn）→ **准入网关**（私聊白名单 / 群策略 / @提及 / 机器人过滤）→ **每会话串行队列**（同会话 FIFO、异会话并发、超时驱逐防卡死）。图片内联转多模态、文件/语音/视频下载落地后交给 agent。
 - **流式回复**：随 agent 生成 token **实时刷新 CardKit 打字机卡片**（`streaming_mode`），结束时定稿；CardKit 不可用/失败时回退普通消息。
 - **静态卡片升级**：非流式回复含代码块/表格时，用 **schema-2.0 交互卡片**渲染（优于 post），其余 markdown 走 `post`。
 - **交互卡片审批**：可选开启后，危险工具调用先发 **Approve/Deny 卡片**并阻塞，按钮点击带 **token 去重**，人工批准后才执行。
 - **出站媒体工具**：注册 `feishu_send_file`，让 agent 主动把本地图片/文件推送到会话。
 
-实现思路借鉴 **hermes-agent 的 `FeishuAdapter`**（长连接、准入、归一化、媒体、审批、身份 hydrate）与 **openclaw 的 feishu channel**（CardKit 流式、逻辑重试去重键、每会话串行队列+超时驱逐、输入去抖、静态卡片、卡片 token 去重），并按 **pi-agent 的 extension 规范**重写：工厂 `(pi) => void` 入口，`session_start` 连接、`message_update` 流式、`tool_call` 审批、`agent_end` 定稿/投递、`session_shutdown` 断开。
+实现思路借鉴 **hermes-agent 的 `FeishuAdapter`**（长连接、准入、归一化、媒体、审批、身份 hydrate）与 **openclaw 的 feishu channel**（扫码开通、CardKit 流式、逻辑重试去重键、每会话串行队列+超时驱逐、输入去抖、静态卡片、卡片 token 去重），并按 **pi-agent 的 extension 规范**重写：工厂 `(pi) => void` 入口，`session_start` 连接（缺凭证走扫码）、`message_update` 流式、`tool_call` 审批、`agent_end` 定稿/投递、`session_shutdown` 断开。
 
-> 为什么用官方 Node SDK 而不是调 lark-cli？lark-cli 是 Go 二进制（通过 npm 分发原生可执行文件），**没有可导入的 JS 库**，只能作为子进程 shell out。本插件选择 **`@larksuiteoapi/node-sdk`**（lark-cli 内部所封装的 Go SDK 的 Node 等价物），做到**进程内、自包含、零外部二进制**，符合“部署包自包含”的原则。
+> 为什么用官方 Node SDK 而不是调 lark-cli？lark-cli 是 Go 二进制（通过 npm 分发原生可执行文件），**没有可导入的 JS 库**，只能作为子进程 shell out。本插件选择 **`@larksuiteoapi/node-sdk`**（lark-cli 内部所封装的 Go SDK 的 Node 等价物），做到**进程内、自包含、零外部二进制**，符合“部署包自包含”的原则。扫码登录直接用 SDK 自带的 `registerApp()`（scan-to-create/select），不手搓 device-code 端点。
 
 ---
 
@@ -18,9 +19,10 @@
 
 ```
 pi-extension-feishu-channel/
-├── index.ts                      # 入口：生命周期 + 去重/去抖/队列编排 + 流式 + 审批 + 投递
-├── config.ts                     # 配置加载（env + 受信任的项目本地 JSON）
+├── index.ts                      # 入口：生命周期 + 扫码开通 + 去重/去抖/队列编排 + 流式 + 审批 + 投递
+├── config.ts                     # 配置加载 + 凭证持久化 saveCredentials（env + 受信任的项目本地 JSON）
 ├── feishu-client.ts              # node-sdk 封装：长连接/收发/上传下载/CardKit/卡片/身份
+├── onboarding.ts                 # 扫码开通：registerApp + 终端二维码渲染 + 结果落盘
 ├── message.ts                    # 消息适配：飞书 <-> 文本/富文本/媒体/卡片（纯函数，易测）
 ├── streaming-card.ts             # CardKit 流式会话（create/节流快照 update/finalize）
 ├── dedup.ts                      # 逻辑重试去重键 + claim/commit 协议
@@ -34,7 +36,24 @@ pi-extension-feishu-channel/
 
 ---
 
-## 一、飞书开放平台配置（一次性）
+## 〇、扫码登录（默认 · 最省事）
+
+装好插件后**直接启动 `pi`**：没有凭证时插件会在终端打印一个二维码。用**飞书手机 App 扫一扫**，页面上**选择已有机器人或新建一个**并确认授权，插件即自动拿到 `App ID / App Secret`、写入 `<project>/.pi/feishu-channel.json`，随后立即连上——**全程不用手动复制密钥、不用进开发者后台配权限**（扫码页已预填 IM 所需的权限/事件/回调，你确认即可）。
+
+```bash
+pi                    # 无凭证时自动进入扫码；或随时手动触发：
+/feishu-login         # 在 pi 里输入，重新扫码登录（/feishu-login lark 走国际版）
+```
+
+- 二维码需要一个**交互式终端**来显示。无 TTY（如 systemd 后台）时不会自动弹码——先在可交互的 shell 里跑一次 `pi` + `/feishu-login` 生成 `feishu-channel.json`，再交给后台常驻即可。
+- 关掉扫码、只用手动凭证：设 `FEISHU_ONBOARDING=false`。
+- 想固定“只新建不选择”或走国际版 Lark，见 [onboarding.ts](./onboarding.ts) 的 `createOnly` / `domain` 选项。
+
+> 如果你更习惯手动在开发者后台建应用、或扫码不可用，下面 **第一节** 给出完整手动步骤；两条路二选一即可。
+
+---
+
+## 一、飞书开放平台配置（手动方式 · 可选）
 
 1. 打开 [开发者后台](https://open.feishu.cn/app) → 创建 **企业自建应用**。
 2. 记录 **App ID**（`cli_...`）和 **App Secret**。
@@ -145,6 +164,7 @@ pi --extension /abs/path/to/pi-extension-feishu-channel/index.ts
 | `FEISHU_QUEUE_TASK_TIMEOUT_MS` | | `300000` | 单任务超时后从阻塞链驱逐（不 abort），防卡死 |
 | `FEISHU_DEDUP_ENABLED` | | `true` | 逻辑重试去重（防长连接重推同一逻辑消息） |
 | `FEISHU_DEDUP_TTL_MS` | | `86400000` | 去重缓存保留时长（毫秒，默认 24h） |
+| `FEISHU_ONBOARDING` | | `true` | 缺凭证时默认走二维码扫码登录（需交互式终端）；设 `false` 只用手动凭证 |
 
 ```bash
 export FEISHU_APP_ID="cli_xxxxxxxx"

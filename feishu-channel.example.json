@@ -1,8 +1,10 @@
 {
-  "//": "Copy this file to <your-project>/.pi/feishu-channel.json and fill in your bot credentials. Env vars (FEISHU_*) override these values. Never commit real secrets.",
+  "//": "OPTIONAL. Prefer QR login: just run pi and scan (or /feishu-login). Copy this to <project>/.pi/feishu-channel.json only for manual setup. Env vars (FEISHU_*) override these. Never commit real secrets.",
   "appId": "cli_xxxxxxxxxxxxxxxx",
   "appSecret": "your-app-secret",
   "domain": "feishu",
+
+  "onboarding": true,
 
   "requireMention": true,
   "allowBots": "none",

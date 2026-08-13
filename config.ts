@@ -131,6 +131,23 @@ export interface FeishuConfig {
 	dedupEnabled: boolean;
 	/** How long (ms) a processed message stays in the dedup cache. Default 86400000 (24h). */
 	dedupTtlMs: number;
+
+	/**
+	 * When credentials are missing, launch the QR scan-to-create/select flow
+	 * (openclaw-style) instead of just disabling the channel. Default true.
+	 * The QR prints to the terminal, so this only auto-runs on an interactive
+	 * TTY; otherwise use the `/feishu-login` command.
+	 */
+	onboarding: boolean;
+}
+
+/** Result of the QR onboarding flow, ready to persist as credentials. */
+export interface OnboardingResult {
+	appId: string;
+	appSecret: string;
+	domain: "feishu" | "lark";
+	/** Bot owner / scanning user open_id, used to seed the DM allowlist. */
+	openId?: string;
 }
 
 const DEFAULTS = {
@@ -158,6 +175,7 @@ const DEFAULTS = {
 	queueTaskTimeoutMs: 300000,
 	dedupEnabled: true,
 	dedupTtlMs: 86400000,
+	onboarding: true,
 };
 
 /** Local config file name under the project `.pi/` directory. */
@@ -208,23 +226,43 @@ export interface LoadConfigOptions {
 	configPathFlag?: string;
 }
 
+export interface LoadConfigResult {
+	config: FeishuConfig | null;
+	error?: string;
+	/** True when credentials are absent but QR onboarding is enabled. */
+	needsOnboarding?: boolean;
+	/** Resolved domain to use for onboarding (from env/file, default feishu). */
+	domain?: "feishu" | "lark";
+	/** Absolute path where onboarding should persist credentials. */
+	credentialsPath?: string;
+}
+
+/** Resolve the domain from env/file layers (used before full config builds). */
+function resolveDomain(pick: (e: string, f: string) => unknown): "feishu" | "lark" {
+	const raw = String(pick("FEISHU_DOMAIN", "domain") ?? DEFAULTS.domain)
+		.trim()
+		.toLowerCase();
+	return raw === "lark" ? "lark" : "feishu";
+}
+
 /**
  * Resolve the effective Feishu configuration.
  *
- * Returns `{ config: null, error }` when required credentials are missing so
- * the caller can surface a friendly message instead of throwing.
+ * When credentials are missing, returns `{ config: null, needsOnboarding }` so
+ * the caller can launch the QR onboarding flow (default) or surface the error.
  */
-export function loadConfig(opts: LoadConfigOptions): { config: FeishuConfig | null; error?: string } {
+export function loadConfig(opts: LoadConfigOptions): LoadConfigResult {
 	const env = process.env;
 
 	// File layer (lowest precedence). Only read when trusted, or when the
 	// operator explicitly pointed at a file via the CLI flag.
 	let fileCfg: Record<string, unknown> = {};
+	let credentialsPath = path.join(opts.cwd, ".pi", CONFIG_FILE_NAME);
 	if (opts.configPathFlag) {
-		fileCfg = readConfigFile(path.resolve(opts.cwd, opts.configPathFlag));
+		credentialsPath = path.resolve(opts.cwd, opts.configPathFlag);
+		fileCfg = readConfigFile(credentialsPath);
 	} else if (opts.projectTrusted) {
-		const candidate = path.join(opts.cwd, ".pi", CONFIG_FILE_NAME);
-		if (fs.existsSync(candidate)) fileCfg = readConfigFile(candidate);
+		if (fs.existsSync(credentialsPath)) fileCfg = readConfigFile(credentialsPath);
 	}
 
 	const pick = (envKey: string, fileKey: string): unknown =>
@@ -234,11 +272,16 @@ export function loadConfig(opts: LoadConfigOptions): { config: FeishuConfig | nu
 	const appSecret = String(pick("FEISHU_APP_SECRET", "appSecret") ?? "").trim();
 
 	if (!appId || !appSecret) {
+		const onboarding = toBool(pick("FEISHU_ONBOARDING", "onboarding"), DEFAULTS.onboarding);
 		return {
 			config: null,
+			needsOnboarding: onboarding,
+			domain: resolveDomain(pick),
+			credentialsPath,
 			error:
 				"Missing Feishu credentials. Set FEISHU_APP_ID and FEISHU_APP_SECRET " +
-				`(env), or add them to <project>/.pi/${CONFIG_FILE_NAME}.`,
+				`(env), or add them to <project>/.pi/${CONFIG_FILE_NAME}` +
+				(onboarding ? ", or run /feishu-login to scan a QR code." : "."),
 		};
 	}
 
@@ -300,7 +343,34 @@ export function loadConfig(opts: LoadConfigOptions): { config: FeishuConfig | nu
 		queueTaskTimeoutMs: toInt(pick("FEISHU_QUEUE_TASK_TIMEOUT_MS", "queueTaskTimeoutMs"), DEFAULTS.queueTaskTimeoutMs, { min: 1000 }),
 		dedupEnabled: toBool(pick("FEISHU_DEDUP_ENABLED", "dedupEnabled"), DEFAULTS.dedupEnabled),
 		dedupTtlMs: toInt(pick("FEISHU_DEDUP_TTL_MS", "dedupTtlMs"), DEFAULTS.dedupTtlMs, { min: 1000 }),
+		onboarding: toBool(pick("FEISHU_ONBOARDING", "onboarding"), DEFAULTS.onboarding),
 	};
 
 	return { config };
+}
+
+/**
+ * Persist onboarding credentials to the project-local JSON config, merging with
+ * any existing file (never clobbering unrelated keys). Seeds the DM allowlist
+ * with the scanning user's open_id when available. Returns the file path.
+ */
+export function saveCredentials(credentialsPath: string, result: OnboardingResult): string {
+	let existing: Record<string, unknown> = {};
+	if (fs.existsSync(credentialsPath)) existing = readConfigFile(credentialsPath);
+
+	const merged: Record<string, unknown> = {
+		...existing,
+		appId: result.appId,
+		appSecret: result.appSecret,
+		domain: result.domain,
+	};
+	// Seed DM allowlist with the owner so only they can DM the fresh bot,
+	// unless the operator already configured access explicitly.
+	if (result.openId && !existing.allowedUsers && existing.allowAllUsers !== true) {
+		merged.allowedUsers = [result.openId];
+	}
+
+	fs.mkdirSync(path.dirname(credentialsPath), { recursive: true });
+	fs.writeFileSync(credentialsPath, `${JSON.stringify(merged, null, 2)}\n`, { mode: 0o600 });
+	return credentialsPath;
 }

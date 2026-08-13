@@ -30,10 +30,11 @@
 import * as fs from "node:fs";
 import { Type } from "typebox";
 import type { ExtensionAPI, ExtensionContext, ImageContent, TextContent } from "@earendil-works/pi-coding-agent";
-import { type FeishuConfig, loadConfig } from "./config.ts";
+import { type FeishuConfig, loadConfig, saveCredentials } from "./config.ts";
 import { createDeduper, type Deduper } from "./dedup.ts";
 import { createInboundDebouncer, type InboundDebouncer } from "./debounce.ts";
 import { type CardActionEvent, FeishuClient, type InboundMessageEvent } from "./feishu-client.ts";
+import { runQrOnboarding } from "./onboarding.ts";
 import {
 	buildApprovalCard,
 	buildOutboundPayload,
@@ -425,42 +426,33 @@ export default function feishuChannel(pi: ExtensionAPI): void {
 		return cfg.approvalTools.includes(toolName);
 	}
 
-	// ----- Lifecycle: activate on session start ------------------------------
-	pi.on("session_start", async (_event, ctx) => {
-		contextRef = ctx;
-		if (started) return; // only connect once per process
-		const configPathFlag = (pi.getFlag("feishu-config") as string | undefined) || undefined;
-		const result = loadConfig({ cwd: ctx.cwd, projectTrusted: ctx.isProjectTrusted(), configPathFlag });
-		if (!result.config) {
-			log(result.error ?? "configuration error");
-			if (ctx.hasUI) ctx.ui.notify(`Feishu channel disabled: ${result.error}`, "warning");
-			return;
-		}
-		cfg = result.config;
-		client = new FeishuClient(cfg, log);
+	/** Build inbound plumbing + open the WS connection for a resolved config. */
+	async function connectWith(resolved: FeishuConfig, ctx: ExtensionContext): Promise<boolean> {
+		cfg = resolved;
+		client = new FeishuClient(resolved, log);
 
-		// Build inbound plumbing.
-		if (cfg.dedupEnabled) {
-			deduper = createDeduper(cfg.dedupTtlMs);
+		if (resolved.dedupEnabled) {
+			deduper = createDeduper(resolved.dedupTtlMs);
 		}
 		// Periodic sweep: expire dedup entries and old card-action tokens.
-		sweepTimer = setInterval(() => {
-			deduper?.sweep();
-			const now = Date.now();
-			for (const [token, claim] of cardTokens) {
-				if (now - claim.at > CARD_TOKEN_TTL_MS) cardTokens.delete(token);
-			}
-		}, 60000);
-		if (typeof sweepTimer.unref === "function") sweepTimer.unref();
-		if (cfg.queueEnabled) {
+		if (!sweepTimer) {
+			sweepTimer = setInterval(() => {
+				deduper?.sweep();
+				const now = Date.now();
+				for (const [token, claim] of cardTokens) {
+					if (now - claim.at > CARD_TOKEN_TTL_MS) cardTokens.delete(token);
+				}
+			}, 60000);
+			if (typeof sweepTimer.unref === "function") sweepTimer.unref();
+		}
+		if (resolved.queueEnabled) {
 			queue = createSequentialQueue({
-				taskTimeoutMs: cfg.queueTaskTimeoutMs,
+				taskTimeoutMs: resolved.queueTaskTimeoutMs,
 				onTaskTimeout: (key) => log(`queue task evicted after timeout (key=${key}); still running in background`),
 			});
 		}
-		if (cfg.debounceEnabled) {
-			debouncer = createInboundDebouncer(cfg.debounceMs, (_key, turn) => {
-				// Commit dedupe claims for every merged message, then run one turn.
+		if (resolved.debounceEnabled) {
+			debouncer = createInboundDebouncer(resolved.debounceMs, (_key, turn) => {
 				for (const part of turn.parts) part.commit?.();
 				const target: BoundChat = {
 					chatId: turn.chatId,
@@ -473,18 +465,79 @@ export default function feishuChannel(pi: ExtensionAPI): void {
 
 		try {
 			await client.hydrateBotIdentity();
-			await client.connect((ev) => onInbound(ev), cfg.approvalEnabled ? onCardAction : undefined);
+			await client.connect((ev) => onInbound(ev), resolved.approvalEnabled ? onCardAction : undefined);
 			started = true;
 			log(
-				`connected (domain=${cfg.domain}, requireMention=${cfg.requireMention}, groupPolicy=${cfg.groupPolicy}, ` +
-					`streaming=${cfg.streaming}, staticCard=${cfg.staticCard}, dedup=${cfg.dedupEnabled}, ` +
-					`debounce=${cfg.debounceEnabled}, queue=${cfg.queueEnabled}, approval=${cfg.approvalEnabled})`,
+				`connected (domain=${resolved.domain}, requireMention=${resolved.requireMention}, groupPolicy=${resolved.groupPolicy}, ` +
+					`streaming=${resolved.streaming}, staticCard=${resolved.staticCard}, dedup=${resolved.dedupEnabled}, ` +
+					`debounce=${resolved.debounceEnabled}, queue=${resolved.queueEnabled}, approval=${resolved.approvalEnabled})`,
 			);
 			if (ctx.hasUI) ctx.ui.notify("Feishu channel connected", "info");
 			if (ctx.hasUI) ctx.ui.setStatus("feishu", "🪽 Feishu");
+			return true;
 		} catch (err) {
 			log(`connect failed: ${(err as Error).message}`);
 			if (ctx.hasUI) ctx.ui.notify(`Feishu channel connect failed: ${(err as Error).message}`, "error");
+			return false;
+		}
+	}
+
+	/**
+	 * Run the QR scan-to-create/select flow, persist the returned credentials,
+	 * then load the full config and connect. Returns true on success.
+	 */
+	async function attemptOnboarding(ctx: ExtensionContext, domain: "feishu" | "lark", credentialsPath: string): Promise<boolean> {
+		if (started) return true;
+		try {
+			log("starting QR onboarding…");
+			if (ctx.hasUI) ctx.ui.notify("Feishu: scan the QR code in your terminal to log in", "info");
+			const result = await runQrOnboarding({ domain, log, out: (t) => process.stdout.write(t) });
+			const saved = saveCredentials(credentialsPath, result);
+			log(`credentials saved to ${saved}`);
+			// Re-load full config from the freshly written file, then connect.
+			const reloaded = loadConfig({
+				cwd: ctx.cwd,
+				projectTrusted: ctx.isProjectTrusted(),
+				configPathFlag: saved,
+			});
+			if (!reloaded.config) {
+				log(`post-onboarding config load failed: ${reloaded.error ?? "unknown"}`);
+				return false;
+			}
+			return await connectWith(reloaded.config, ctx);
+		} catch (err) {
+			log(`onboarding failed: ${(err as Error).message}`);
+			if (ctx.hasUI) ctx.ui.notify(`Feishu onboarding failed: ${(err as Error).message}`, "error");
+			return false;
+		}
+	}
+
+	// ----- Lifecycle: activate on session start ------------------------------
+	pi.on("session_start", async (_event, ctx) => {
+		contextRef = ctx;
+		if (started) return; // only connect once per process
+		const configPathFlag = (pi.getFlag("feishu-config") as string | undefined) || undefined;
+		const result = loadConfig({ cwd: ctx.cwd, projectTrusted: ctx.isProjectTrusted(), configPathFlag });
+
+		if (result.config) {
+			await connectWith(result.config, ctx);
+			return;
+		}
+
+		// No credentials. Default to QR onboarding when enabled and we have an
+		// interactive terminal to print the QR into. Otherwise, guide the user.
+		const interactive = process.stdout.isTTY === true;
+		if (result.needsOnboarding && interactive) {
+			await attemptOnboarding(ctx, result.domain ?? "feishu", result.credentialsPath ?? "");
+			return;
+		}
+
+		log(result.error ?? "configuration error");
+		if (ctx.hasUI) {
+			const hint = result.needsOnboarding
+				? `${result.error} (run /feishu-login to scan a QR code)`
+				: result.error;
+			ctx.ui.notify(`Feishu channel disabled: ${hint}`, "warning");
 		}
 	});
 
@@ -643,6 +696,25 @@ export default function feishuChannel(pi: ExtensionAPI): void {
 				: "(no config)";
 			const recent = logLines.slice(-8).join("\n") || "(no log lines yet)";
 			ctx.ui.notify(`Feishu: ${status}; bound: ${bound}; ${feats}\n${recent}`, "info");
+		},
+	});
+
+	// ----- QR login command: scan to create/select a bot ---------------------
+	pi.registerCommand("feishu-login", {
+		description: "Scan a QR code to create or select a Feishu bot, then connect (prints QR to terminal)",
+		handler: async (args, ctx) => {
+			if (started) {
+				ctx.ui.notify("Feishu channel is already connected. Use /feishu-status.", "info");
+				return;
+			}
+			// Resolve domain + persistence path from whatever config layers exist.
+			const configPathFlag = (pi.getFlag("feishu-config") as string | undefined) || undefined;
+			const result = loadConfig({ cwd: ctx.cwd, projectTrusted: ctx.isProjectTrusted(), configPathFlag });
+			const domain: "feishu" | "lark" = args.trim().toLowerCase() === "lark" ? "lark" : result.domain ?? "feishu";
+			const credentialsPath = result.credentialsPath ?? "";
+			ctx.ui.notify("Feishu QR login started — check your terminal for the QR code.", "info");
+			const ok = await attemptOnboarding(ctx, domain, credentialsPath);
+			ctx.ui.notify(ok ? "Feishu connected." : "Feishu login did not complete (see logs).", ok ? "info" : "warning");
 		},
 	});
 
