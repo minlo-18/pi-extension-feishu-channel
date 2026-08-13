@@ -34,6 +34,13 @@ import { type FeishuConfig, loadConfig, saveCredentials } from "./config.ts";
 import { createDeduper, type Deduper } from "./dedup.ts";
 import { createInboundDebouncer, type InboundDebouncer } from "./debounce.ts";
 import { type CardActionEvent, FeishuClient, type InboundMessageEvent } from "./feishu-client.ts";
+import {
+	formatHelp,
+	formatModelList,
+	matchModel,
+	parseCommand,
+	parseThinkingLevel,
+} from "./commands.ts";
 import { runQrOnboarding } from "./onboarding.ts";
 import {
 	buildApprovalCard,
@@ -300,10 +307,21 @@ export default function feishuChannel(pi: ExtensionAPI): void {
 			return;
 		}
 
+		// Chat commands (/model, /thinking, /stop, …) are intercepted here so
+		// they control the pi session instead of being answered by the LLM.
+		const isPlainText = ev.messageType === "text" && normalized.media.length === 0;
+		if (isPlainText) {
+			const parsed = parseCommand(normalized.text);
+			if (parsed) {
+				commit?.();
+				const target: BoundChat = { chatId: ev.chatId, chatType: ev.chatType, lastMessageId: ev.messageId };
+				void handleChatCommand(parsed.name, parsed.arg, target);
+				return;
+			}
+		}
+
 		// Debounce: coalesce rapid text from the same sender. Media / disabled
 		// debounce flush immediately as a single-item batch.
-		const isPlainText = ev.messageType === "text" && normalized.media.length === 0;
-
 		if (cfg.debounceEnabled && isPlainText && cfg.debounceMs > 0 && debouncer) {
 			debouncer.push(`${ev.chatId}:${ev.senderOpenId ?? "?"}`, {
 				messageId: ev.messageId,
@@ -415,6 +433,110 @@ export default function feishuChannel(pi: ExtensionAPI): void {
 				if (activeReaction?.messageId === reactMsgId) activeReaction.reactionId = reactionId;
 				else if (reactionId) void client?.removeReaction(reactMsgId, reactionId);
 			});
+		}
+	}
+
+	/**
+	 * Handle an intercepted `/command` from a Feishu chat. Replies directly to
+	 * the chat and never reaches the LLM. Only ops reachable from the inbound
+	 * context are actually performed; session-lifecycle ops (new/fork/switch)
+	 * are not exposed to channel handlers by pi, so we say so honestly.
+	 */
+	async function handleChatCommand(name: string, arg: string, target: BoundChat): Promise<void> {
+		const ctx = contextRef;
+		if (!ctx || !cfg) return;
+		const reply = (text: string) => deliver(target, text);
+
+		switch (name) {
+			case "help":
+			case "commands":
+				await reply(formatHelp());
+				return;
+
+			case "stop": {
+				if (ctx.isIdle()) {
+					await reply("Nothing is running right now.");
+				} else {
+					ctx.abort();
+					await reply("⏹️ Stopped the current reply.");
+				}
+				return;
+			}
+
+			case "status": {
+				const model = ctx.model ? `${ctx.model.name} (\`${ctx.model.id}\`)` : "unknown";
+				const think = ctx.getThinkingLevel?.() ?? cfg.streaming;
+				const usage = ctx.getContextUsage?.();
+				const ctxLine = usage?.percent != null ? `${usage.percent.toFixed(1)}% of ${usage.contextWindow}` : "n/a";
+				const busy = ctx.isIdle() ? "idle" : "working";
+				await reply(
+					`**Status**\nmodel: ${model}\nthinking: ${think}\ncontext: ${ctxLine}\nstate: ${busy}`,
+				);
+				return;
+			}
+
+			case "thinking": {
+				if (!arg) {
+					const cur = ctx.getThinkingLevel?.() ?? "?";
+					await reply(`Current thinking level: **${cur}**.\nUsage: \`/thinking <off|minimal|low|medium|high|xhigh|max>\``);
+					return;
+				}
+				const level = parseThinkingLevel(arg);
+				if (!level) {
+					await reply(`Unknown thinking level "${arg}". Valid: off, minimal, low, medium, high, xhigh, max.`);
+					return;
+				}
+				try {
+					pi.setThinkingLevel(level);
+					await reply(`Thinking level set to **${level}** (clamped to model support).`);
+				} catch (err) {
+					await reply(`Failed to set thinking level: ${(err as Error).message}`);
+				}
+				return;
+			}
+
+			case "model": {
+				const models = (ctx.modelRegistry?.getAvailable?.() ?? []) as Array<{
+					id: string;
+					name: string;
+					provider: string;
+					reasoning: boolean;
+				}>;
+				if (!arg) {
+					await reply(formatModelList(models, ctx.model?.id));
+					return;
+				}
+				const match = matchModel(arg, models);
+				if (match.kind === "none") {
+					await reply(`No model matches "${arg}". Send \`/model\` to list available models.`);
+					return;
+				}
+				if (match.kind === "ambiguous") {
+					const names = match.matches.slice(0, 10).map((m) => `\`${m.id}\``).join(", ");
+					await reply(`"${arg}" matches multiple models: ${names}. Be more specific.`);
+					return;
+				}
+				try {
+					const ok = await pi.setModel(match.model as never);
+					await reply(ok ? `Model switched to **${match.model.name}** (\`${match.model.id}\`).` : `Cannot switch to ${match.model.name}: no API key configured for it.`);
+				} catch (err) {
+					await reply(`Failed to switch model: ${(err as Error).message}`);
+				}
+				return;
+			}
+
+			case "clear":
+			case "new":
+			case "reset":
+				await reply(
+					"This bridge runs a single pi session, so it can't fork/switch sessions from chat. " +
+						"To start fresh, run `/new` (or restart pi) in the pi terminal; the conversation here will follow it.",
+				);
+				return;
+
+			default:
+				await reply(`Unknown command \`/${name}\`. Send \`/help\` for the list.`);
+				return;
 		}
 	}
 

@@ -9,6 +9,7 @@
 - **静态卡片升级**：非流式回复含代码块/表格时，用 **schema-2.0 交互卡片**渲染（优于 post），其余 markdown 走 `post`。
 - **交互卡片审批**：可选开启后，危险工具调用先发 **Approve/Deny 卡片**并阻塞，按钮点击带 **token 去重**，人工批准后才执行。
 - **出站媒体工具**：注册 `feishu_send_file`，让 agent 主动把本地图片/文件推送到会话。
+- **聊天内命令**：`/`开头的消息被拦截、不发给模型——`/help` `/status` `/model` `/thinking` `/stop` 直接控制 pi 会话（切模型/思考强度/停止/查状态）。
 
 实现思路借鉴 **hermes-agent 的 `FeishuAdapter`**（长连接、准入、归一化、媒体、审批、身份 hydrate）与 **openclaw 的 feishu channel**（扫码开通、CardKit 流式、逻辑重试去重键、每会话串行队列+超时驱逐、输入去抖、静态卡片、卡片 token 去重），并按 **pi-agent 的 extension 规范**重写：工厂 `(pi) => void` 入口，`session_start` 连接（缺凭证走扫码）、`message_update` 流式、`tool_call` 审批、`agent_end` 定稿/投递、`session_shutdown` 断开。
 
@@ -199,6 +200,21 @@ pi
 - TUI 里会看到 “Feishu channel connected” 通知，状态栏显示 `🪽 Feishu`。
 - 在飞书里私聊机器人，或在群里 @机器人 发消息 → 内容进入 agent → agent 回复回投到该会话。
 - 随时用 `/feishu-status` 查看连接状态、当前绑定会话与最近日志。
+
+### 在飞书里可用的命令
+
+`/`开头的消息会被插件**拦截**、不发给模型，用来直接控制 pi 会话：
+
+| 命令 | 作用 |
+|---|---|
+| `/help` | 显示命令帮助 |
+| `/status` | 查看当前模型、思考强度、上下文占用、运行状态 |
+| `/model` | 列出可用模型；`/model <名称或id>` 切换模型 |
+| `/thinking` | 查看思考强度；`/thinking <off\|minimal\|low\|medium\|high\|xhigh\|max>` 设置 |
+| `/stop` | 停止当前这条回复（`ctx.abort()`） |
+| `/clear`、`/new` | 提示：本桥接是单会话，无法从聊天里新建/切换会话；请在 pi 终端里 `/new` 或重启，聊天会跟随 |
+
+> 说明：pi 只把「新建/fork/切换会话」暴露给它自己的斜杠命令处理器，**不开放给渠道入站回调**——所以 `/new` 只能在 pi 终端里做。其余（切模型、思考强度、停止、状态）从飞书即可操作。
 
 ### 无界面 / 后台运行
 
