@@ -1,0 +1,45 @@
+{
+  "//": "Copy this file to <your-project>/.pi/feishu-channel.json and fill in your bot credentials. Env vars (FEISHU_*) override these values. Never commit real secrets.",
+  "appId": "cli_xxxxxxxxxxxxxxxx",
+  "appSecret": "your-app-secret",
+  "domain": "feishu",
+
+  "requireMention": true,
+  "allowBots": "none",
+
+  "groupPolicy": "open",
+  "allowedChats": [],
+
+  "allowedUsers": [],
+  "allowAllUsers": false,
+
+  "botOpenId": "",
+  "botName": "",
+
+  "replyInGroup": true,
+  "maxMessageLength": 8000,
+
+  "richText": true,
+
+  "forwardMedia": true,
+  "inboundDir": "",
+
+  "approvalEnabled": false,
+  "approvalTools": [],
+  "approvalTimeoutMs": 300000,
+  "approvalTimeoutAllow": false,
+
+  "streaming": true,
+  "streamingThrottleMs": 160,
+
+  "staticCard": true,
+
+  "debounceEnabled": true,
+  "debounceMs": 800,
+
+  "queueEnabled": true,
+  "queueTaskTimeoutMs": 300000,
+
+  "dedupEnabled": true,
+  "dedupTtlMs": 86400000
+}

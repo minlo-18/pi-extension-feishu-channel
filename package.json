@@ -1,0 +1,39 @@
+{
+  "name": "pi-extension-feishu-channel",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Feishu / Lark chat channel for pi-agent. Connects a pi coding-agent session to a Feishu bot over a WebSocket long-connection: inbound IM messages become user prompts, assistant replies stream back as CardKit typewriter cards.",
+  "type": "module",
+  "license": "MIT",
+  "author": "minlo-18",
+  "homepage": "https://github.com/minlo-18/pi-extension-feishu-channel#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/minlo-18/pi-extension-feishu-channel.git"
+  },
+  "bugs": {
+    "url": "https://github.com/minlo-18/pi-extension-feishu-channel/issues"
+  },
+  "scripts": {
+    "clean": "echo 'nothing to clean'",
+    "build": "echo 'nothing to build'",
+    "check": "echo 'nothing to check'"
+  },
+  "keywords": [
+    "pi-package",
+    "feishu",
+    "lark",
+    "channel"
+  ],
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "dependencies": {
+    "@larksuiteoapi/node-sdk": "^1.53.0"
+  }
+}

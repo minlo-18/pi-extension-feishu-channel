@@ -1,0 +1,10 @@
+node_modules/
+# never commit real credentials
+feishu-channel.json
+.pi/feishu-channel.json
+# local type-check / verification scratch (not part of the package)
+tsconfig.check.json
+pi-shim.d.ts
+probe.mjs
+probe.mts
+sdk-probe.ts
