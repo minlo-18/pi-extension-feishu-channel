@@ -431,6 +431,21 @@ export default function feishuChannel(pi: ExtensionAPI): void {
 		cfg = resolved;
 		client = new FeishuClient(resolved, log);
 
+		// Verify credentials BEFORE building plumbing / opening the WS. The WS
+		// client fails asynchronously on a bad app_id (it never throws from
+		// start()), which previously left us marked "connected" with a dead
+		// socket. A tenant_access_token probe catches bad/placeholder creds up
+		// front so we can fall through to QR onboarding instead.
+		const verify = await client.verifyCredentials();
+		if (!verify.ok) {
+			const detail = `${verify.message ?? "invalid credentials"}${verify.code !== undefined ? ` (code ${verify.code})` : ""}`;
+			log(`credential check failed: ${detail}`);
+			if (ctx.hasUI) ctx.ui.notify(`Feishu credentials invalid: ${detail}`, "warning");
+			client = undefined;
+			cfg = undefined;
+			return false;
+		}
+
 		if (resolved.dedupEnabled) {
 			deduper = createDeduper(resolved.dedupTtlMs);
 		}
@@ -519,14 +534,23 @@ export default function feishuChannel(pi: ExtensionAPI): void {
 		const configPathFlag = (pi.getFlag("feishu-config") as string | undefined) || undefined;
 		const result = loadConfig({ cwd: ctx.cwd, projectTrusted: ctx.isProjectTrusted(), configPathFlag });
 
+		const interactive = process.stdout.isTTY === true;
+		const onboardingAllowed = result.config ? result.config.onboarding : result.needsOnboarding !== false;
+
 		if (result.config) {
-			await connectWith(result.config, ctx);
+			// Credentials present — try to connect. If they turn out invalid
+			// (probe fails), fall through to QR onboarding on an interactive TTY.
+			const ok = await connectWith(result.config, ctx);
+			if (ok) return;
+			if (interactive && onboardingAllowed) {
+				log("configured credentials failed; falling back to QR onboarding");
+				await attemptOnboarding(ctx, result.domain ?? result.config.domain, result.credentialsPath ?? "");
+			}
 			return;
 		}
 
 		// No credentials. Default to QR onboarding when enabled and we have an
 		// interactive terminal to print the QR into. Otherwise, guide the user.
-		const interactive = process.stdout.isTTY === true;
 		if (result.needsOnboarding && interactive) {
 			await attemptOnboarding(ctx, result.domain ?? "feishu", result.credentialsPath ?? "");
 			return;

@@ -243,6 +243,36 @@ export class FeishuClient {
 	}
 
 	/**
+	 * Verify the configured credentials are usable before we open the WS and
+	 * declare "connected". Mints a tenant_access_token via the internal auth
+	 * endpoint; a bad app_id/secret (e.g. leftover example placeholders) fails
+	 * here with a clear Feishu error code (e.g. 10003 invalid param) instead of
+	 * silently failing later inside the WS client.
+	 *
+	 * Returns `{ ok: true }` on success, or `{ ok: false, code, message }`.
+	 */
+	async verifyCredentials(): Promise<{ ok: boolean; code?: number; message?: string }> {
+		await this.ensureLoaded();
+		try {
+			const resp: any = await this.client.request({
+				method: "POST",
+				url: "/open-apis/auth/v3/tenant_access_token/internal",
+				data: { app_id: this.cfg.appId, app_secret: this.cfg.appSecret },
+			});
+			const code = resp?.code;
+			const token = resp?.tenant_access_token ?? resp?.data?.tenant_access_token;
+			if ((code === undefined || code === 0) && token) return { ok: true };
+			return { ok: false, code, message: resp?.msg ?? "no tenant_access_token returned" };
+		} catch (err) {
+			// The SDK may throw with a structured Feishu error body.
+			const anyErr = err as { code?: number; msg?: string; message?: string; response?: { data?: { code?: number; msg?: string } } };
+			const code = anyErr.code ?? anyErr.response?.data?.code;
+			const message = anyErr.msg ?? anyErr.response?.data?.msg ?? anyErr.message ?? "auth request failed";
+			return { ok: false, code, message };
+		}
+	}
+
+	/**
 	 * Open the WebSocket long-connection. Routes inbound IM messages to
 	 * `onMessage` and interactive-card clicks to `onCardAction`.
 	 */

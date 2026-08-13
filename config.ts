@@ -196,6 +196,21 @@ function toInt(value: unknown, fallback: number, { min = 0 } = {}): number {
 	return Number.isFinite(n) && n >= min ? n : fallback;
 }
 
+/**
+ * Detect leftover example placeholders (from feishu-channel.example.json) so we
+ * route to onboarding instead of "connecting" with garbage. A real Feishu app
+ * id is `cli_` + 16 hex chars; the example ships `cli_xxxxxxxxxxxxxxxx` /
+ * `your-app-secret`.
+ */
+function isPlaceholderCredential(appId: string, appSecret: string): boolean {
+	const id = appId.toLowerCase();
+	const secret = appSecret.toLowerCase();
+	if (/^cli_x+$/.test(id)) return true; // cli_xxxxxxxxxxxxxxxx
+	if (id.includes("xxxx") || id === "cli_" || id === "your-app-id") return true;
+	if (secret === "your-app-secret" || secret.includes("xxxx") || secret === "your-app-secret-here") return true;
+	return false;
+}
+
 function toList(value: unknown): string[] {
 	if (Array.isArray(value)) return value.map((v) => String(v).trim()).filter(Boolean);
 	if (typeof value === "string") {
@@ -271,16 +286,19 @@ export function loadConfig(opts: LoadConfigOptions): LoadConfigResult {
 	const appId = String(pick("FEISHU_APP_ID", "appId") ?? "").trim();
 	const appSecret = String(pick("FEISHU_APP_SECRET", "appSecret") ?? "").trim();
 
-	if (!appId || !appSecret) {
+	if (!appId || !appSecret || isPlaceholderCredential(appId, appSecret)) {
 		const onboarding = toBool(pick("FEISHU_ONBOARDING", "onboarding"), DEFAULTS.onboarding);
+		const placeholder = Boolean(appId) && Boolean(appSecret); // present but placeholder
 		return {
 			config: null,
 			needsOnboarding: onboarding,
 			domain: resolveDomain(pick),
 			credentialsPath,
 			error:
-				"Missing Feishu credentials. Set FEISHU_APP_ID and FEISHU_APP_SECRET " +
-				`(env), or add them to <project>/.pi/${CONFIG_FILE_NAME}` +
+				(placeholder
+					? `Feishu credentials look like unfilled example placeholders in <project>/.pi/${CONFIG_FILE_NAME}. `
+					: "Missing Feishu credentials. ") +
+				"Set FEISHU_APP_ID and FEISHU_APP_SECRET (env) or fill the config file" +
 				(onboarding ? ", or run /feishu-login to scan a QR code." : "."),
 		};
 	}
@@ -346,7 +364,7 @@ export function loadConfig(opts: LoadConfigOptions): LoadConfigResult {
 		onboarding: toBool(pick("FEISHU_ONBOARDING", "onboarding"), DEFAULTS.onboarding),
 	};
 
-	return { config };
+	return { config, domain: config.domain, credentialsPath };
 }
 
 /**
