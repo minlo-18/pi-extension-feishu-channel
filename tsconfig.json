@@ -1,0 +1,30 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "Node16",
+    "moduleResolution": "Node16",
+    "lib": ["ES2022"],
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "allowImportingTsExtensions": true,
+    "types": ["node"],
+    "noEmit": true
+  },
+  "include": [
+    "./bridge.ts",
+    "./commands.ts",
+    "./config.ts",
+    "./debounce.ts",
+    "./dedup.ts",
+    "./feishu-client.ts",
+    "./message.ts",
+    "./onboarding.ts",
+    "./queue.ts",
+    "./session-store.ts",
+    "./streaming-card.ts"
+  ],
+  "exclude": ["node_modules"]
+}

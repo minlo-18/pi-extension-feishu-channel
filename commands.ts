@@ -2,15 +2,10 @@
  * Chat command parsing for the Feishu bridge.
  *
  * Messages that start with `/` are intercepted BEFORE they reach the LLM, so
- * `/model`, `/thinking`, `/stop`, etc. actually control the pi session instead
- * of being answered "conversationally" by the model. This module is pure and
- * dependency-free so it is easy to unit test; the effects (setModel, abort, …)
- * live in index.ts against the verified pi contract.
- *
- * Scope note: pi only exposes session-lifecycle ops (newSession / fork /
- * switchSession) on the slash-command context, NOT to inbound channel handlers.
- * So `/new` etc. cannot be truly performed from the bridge — we reply honestly
- * rather than let the model pretend.
+ * `/model`, `/thinking`, `/stop`, `/new`, etc. control the Feishu-managed
+ * chat session instead of being answered conversationally by the model. This
+ * module is pure and dependency-free so it is easy to unit test; the effects
+ * live in `bridge.ts` against the verified pi contract.
  */
 
 /** Thinking levels pi supports (see ThinkingLevel in pi-ai). */
@@ -72,24 +67,25 @@ export function parseThinkingLevel(arg: string): ThinkingLevelName | null {
 export function formatModelList(models: ModelLike[], current?: string): string {
 	if (models.length === 0) return "No models are available in this session.";
 	const lines = models.slice(0, 40).map((m) => {
-		const mark = current && (m.id === current || m.name === current) ? "• " : "  ";
+		const mark = current && (m.id === current || m.name === current) ? "* " : "  ";
 		const think = m.reasoning ? " (reasoning)" : "";
-		return `${mark}${m.name}${think}  —  \`${m.id}\``;
+		return `${mark}${m.name}${think} - \`${m.id}\``;
 	});
-	const more = models.length > 40 ? `\n…and ${models.length - 40} more` : "";
-	return `**Available models** (current marked •):\n${lines.join("\n")}${more}\n\nUsage: \`/model <name or id>\``;
+	const more = models.length > 40 ? `\n...and ${models.length - 40} more` : "";
+	return `**Available models** (current marked with \`*\`):\n${lines.join("\n")}${more}\n\nUsage: \`/model <name or id>\``;
 }
 
 /** Render the `/help` text listing supported chat commands. */
 export function formatHelp(): string {
 	return [
 		"**Feishu bot commands**",
-		"`/help` — show this help",
-		"`/status` — model, thinking level, context usage, connection",
-		"`/model` — list models; `/model <name|id>` — switch model",
-		"`/thinking` — show levels; `/thinking <level>` — set (off/minimal/low/medium/high/xhigh/max)",
-		"`/stop` — stop the current reply",
-		"`/clear` — note about starting fresh",
+		"`/help` - show this help",
+		"`/status` - model, thinking level, context usage, chat session id",
+		"`/model` - list models; `/model <name|id>` - switch model",
+		"`/thinking` - show levels; `/thinking <level>` - set (off/minimal/low/medium/high/xhigh/max)",
+		"`/stop` - stop the current reply in this chat",
+		"`/new` - start a fresh session for this chat",
+		"`/clear` `/reset` - aliases for `/new`",
 		"",
 		"Anything not starting with `/` is sent to the agent as usual.",
 	].join("\n");

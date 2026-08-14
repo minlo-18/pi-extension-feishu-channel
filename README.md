@@ -9,7 +9,7 @@
 - **静态卡片升级**：非流式回复含代码块/表格时，用 **schema-2.0 交互卡片**渲染（优于 post），其余 markdown 走 `post`。
 - **交互卡片审批**：可选开启后，危险工具调用先发 **Approve/Deny 卡片**并阻塞，按钮点击带 **token 去重**，人工批准后才执行。
 - **出站媒体工具**：注册 `feishu_send_file`，让 agent 主动把本地图片/文件推送到会话。
-- **聊天内命令**：`/`开头的消息被拦截、不发给模型——`/help` `/status` `/model` `/thinking` `/stop` 直接控制 pi 会话（切模型/思考强度/停止/查状态）。
+- **聊天内命令**：`/`开头的消息被拦截、不发给模型——`/help` `/status` `/model` `/thinking` `/stop` `/new` 直接控制当前飞书会话；其中 `/new` 会真正为该 chat 创建一个全新的 pi 会话。
 
 实现思路借鉴 **hermes-agent 的 `FeishuAdapter`**（长连接、准入、归一化、媒体、审批、身份 hydrate）与 **openclaw 的 feishu channel**（扫码开通、CardKit 流式、逻辑重试去重键、每会话串行队列+超时驱逐、输入去抖、静态卡片、卡片 token 去重），并按 **pi-agent 的 extension 规范**重写：工厂 `(pi) => void` 入口，`session_start` 连接（缺凭证走扫码）、`message_update` 流式、`tool_call` 审批、`agent_end` 定稿/投递、`session_shutdown` 断开。
 
@@ -21,7 +21,8 @@
 
 ```
 pi-extension-feishu-channel/
-├── index.ts                      # 入口：生命周期 + 扫码开通 + 去重/去抖/队列编排 + 流式 + 审批 + 投递
+├── bridge.ts                     # 入口：生命周期 + 多 chat 会话管理 + 去重/去抖/队列编排 + 流式 + 审批 + 投递
+├── session-store.ts              # chat -> session file 持久化（.pi/feishu-sessions/）
 ├── config.ts                     # 配置加载 + 凭证持久化 saveCredentials（env + 受信任的项目本地 JSON）
 ├── feishu-client.ts              # node-sdk 封装：长连接/收发/上传下载/CardKit/卡片/身份
 ├── onboarding.ts                 # 扫码开通：registerApp + 终端二维码渲染 + 结果落盘
@@ -124,7 +125,7 @@ npm install --omit=dev        # 只装运行期依赖
 ### 方式 C：显式加载（本地试用，不安装到扩展目录）
 
 ```bash
-pi --extension /abs/path/to/pi-extension-feishu-channel/index.ts
+pi --extension /abs/path/to/pi-extension-feishu-channel/bridge.ts
 ```
 
 ---
@@ -212,9 +213,9 @@ pi
 | `/model` | 列出可用模型；`/model <名称或id>` 切换模型 |
 | `/thinking` | 查看思考强度；`/thinking <off\|minimal\|low\|medium\|high\|xhigh\|max>` 设置 |
 | `/stop` | 停止当前这条回复（`ctx.abort()`） |
-| `/clear`、`/new` | 提示：本桥接是单会话，无法从聊天里新建/切换会话；请在 pi 终端里 `/new` 或重启，聊天会跟随 |
+| `/clear`、`/new`、`/reset` | 为当前 chat 真正创建一个全新的 pi 会话，不影响其他 chat |
 
-> 说明：pi 只把「新建/fork/切换会话」暴露给它自己的斜杠命令处理器，**不开放给渠道入站回调**——所以 `/new` 只能在 pi 终端里做。其余（切模型、思考强度、停止、状态）从飞书即可操作。
+> 说明：当前版本在插件内部用 pi SDK 自管每个 chat 的 `AgentSession`，所以 `/new` 不再只是提示，而是会直接为该 chat 换到一条新的会话文件；不同飞书 chat 之间也会各自保持上下文。
 
 ### 无界面 / 后台运行
 
@@ -225,7 +226,7 @@ pi
 pi
 ```
 
-> 说明：pi 是**单会话** agent。本插件对多会话做了串行化——首个活跃会话被绑定；当 agent 正忙时，来自**同一会话**的新消息作为 `followUp` 排队，来自**其他会话**的消息会收到“正忙，请稍后”的提示，避免被静默丢弃。
+> 说明：当前版本在插件内部为每个飞书 chat 自管一个 `AgentSession`，并把会话文件持久化到 `.pi/feishu-sessions/`。同一 chat 的新消息仍按 `followUp` 顺序进入该 chat 的会话，不同 chat 则各自保留上下文。
 
 ---
 
@@ -311,14 +312,14 @@ agent 主动推文件：feishu_send_file 工具 → uploadImage/uploadFile → �
 | 去重 | openclaw `resolveFeishuMessageDedupeKey`（text-retry 身份） | `dedup.ts: resolveDedupeKey` + claim/commit |
 | 去抖合并 | openclaw inbound debouncer | `debounce.ts: createInboundDebouncer` |
 | 串行队列 | openclaw `createSequentialQueue`（超时驱逐） | `queue.ts: createSequentialQueue` |
-| 准入 | `_admit` / `_mentions_self` | `index.ts: admit` / `message.ts: mentionsSelf` |
+| 准入 | `_admit` / `_mentions_self` | `bridge.ts: admit` / `message.ts: mentionsSelf` |
 | 身份 | `_hydrate_bot_identity` | `feishu-client.ts: hydrateBotIdentity` |
 | 入站媒体 | `message_resource.get` | `feishu-client.ts: downloadResource` → 图片内联/文件落地 |
 | 出站媒体 | `send_image_file` / 上传 | `feishu-client.ts: uploadImage/uploadFile` + `feishu_send_file` 工具 |
 | 流式回复 | openclaw `FeishuStreamingSession`（CardKit） | `streaming-card.ts: FeishuStreamingSession`（`message_update` 驱动） |
 | 静态卡片 | openclaw `shouldUseCard`（代码/表格） | `message.ts: hasCodeOrTable` + `buildStaticContentCard` |
 | 富文本 | `_build_markdown_post_payload` | `message.ts: buildOutboundPayload` / `renderMarkdownToPostRows` |
-| 卡片审批 | `send_exec_approval` + token 去重 | `index.ts: tool_call`（阻塞）+ `buildApprovalCard` + `card.action.trigger` + token 去重 |
+| 卡片审批 | `send_exec_approval` + token 去重 | `bridge.ts` 内联 approval extension（阻塞）+ `buildApprovalCard` + `card.action.trigger` + token 去重 |
 | 发送 | `message.reply` / `.create` | `feishu-client.ts: replyToMessage` / `sendToChat` / `sendCardEntity` |
 | 注入 agent | 内部 gateway 会话 | `pi.sendUserMessage`（文本+图片，`deliverAs: followUp`） |
 | 生命周期 | `connect` / `disconnect` | `session_start` / `session_shutdown` |
@@ -359,9 +360,9 @@ agent 主动推文件：feishu_send_file 工具 → uploadImage/uploadFile → �
 | **每会话串行队列** | 同 chat FIFO、异 chat 并发；单任务超时**驱逐出阻塞链但不 abort**，防挂起 turn 永久堵死会话 | `queueEnabled` / `queueTaskTimeoutMs` | [queue.ts](./queue.ts) |
 | **输入去抖合并** | 同发送人连发的文本在静默窗口后合并成一个 turn，省 token、更自然 | `debounceEnabled` / `debounceMs` | [debounce.ts](./debounce.ts) |
 | **静态卡片升级** | 含代码块/表格的回复用 schema-2.0 卡片渲染（优于 post） | `staticCard` | [message.ts](./message.ts) |
-| **审批卡 token 去重** | 按钮点击按 token 声明，防重复处理同一次点击 | 随 `approvalEnabled` 生效 | [index.ts](./index.ts) |
+| **审批卡 token 去重** | 按钮点击按 token 声明，防重复处理同一次点击 | 随 `approvalEnabled` 生效 | [bridge.ts](./bridge.ts) |
 
-流式说明：本插件用 CardKit（`cardkit.v1.card.create` 建卡 → `cardElement.content` 推**全量快照**、CardKit 自算增量 → `card.settings` 关流），节流为 `160ms` + 句末标点/大增量立即刷新 + 单调 `sequence` 有序。相比 openclaw 我们做了**简化**：单卡片、单 turn，不搬其“generation/settlement 竞态状态机”（那是为多 payload/broadcast 服务的，pi 单会话用不到）。任何一步失败都回退普通消息，并对流式启动失败做 60s 退避。
+流式说明：本插件用 CardKit（`cardkit.v1.card.create` 建卡 → `cardElement.content` 推**全量快照**、CardKit 自算增量 → `card.settings` 关流），节流为 `160ms` + 句末标点/大增量立即刷新 + 单调 `sequence` 有序。相比 openclaw 我们做了**简化**：单卡片、单 turn，不搬其“generation/settlement 竞态状态机”。任何一步失败都回退普通消息，并对流式启动失败做 60s 退避。
 
 ---
 
